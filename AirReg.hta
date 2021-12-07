@@ -1,0 +1,541 @@
+<html>
+<head>
+
+<title>AirReg</title>
+
+<HTA:APPLICATION
+  APPLICATIONNAME="Airplane Registration Lookup"
+  ID="AirReg"
+  VERSION="1.04"
+  BORDER="dialog"
+  INNERBORDER="no"
+  MAXIMIZEBUTTON="no"
+  SCROLL="no"
+  SINGLEINSTANCE="yes"/>
+
+<style type="text/css">
+a {
+	white-space: nowrap;
+	font-size: 10pt;
+}
+
+body {
+	font-family: sans-serif;
+	font-size: 10pt;
+}
+
+input.Button {
+	width: 80px;
+}
+
+span.Link {
+	color: blue;
+	cursor: pointer;
+	text-decoration: underline;
+}
+
+td {
+	font-size: 10pt;
+}
+
+.Center {
+	margin-left: auto;
+	margin-right: auto;
+	text-align: center;
+}
+
+.Top {
+	vertical-align: top;
+}
+</style>
+</head>
+
+
+<script language="VBScript">
+Option Explicit
+
+Const TristateFalse      =  0
+Const TristateMixed      = -2
+Const TristateTrue       = -1
+Const TristateUseDefault = -2
+
+Const ForAppending = 8
+Const ForReading   = 1
+Const ForWriting   = 2
+
+' Internet Explorer constants
+Const navOpenInNewWindow       =     1
+Const navNoHistory             =     2
+Const navNoReadFromCache       =     4
+Const navNoWriteToCache        =     8
+Const navAllowAutosearch       =    16
+Const navBrowserBar            =    32
+Const navHyperlink             =    64
+Const navEnforceRestricted     =   128
+Const navNewWindowsManaged     =   256
+Const navUntrustedForDownload  =   512
+Const navTrustedForActiveX     =  1024
+Const navOpenInNewTab          =  2048
+Const navOpenInBackgroundTab   =  4096
+Const navKeepWordWheelText     =  8192
+Const navVirtualTab            = 16384
+Const navBlockRedirectsXDomain = 32768
+Const navOpenNewForegroundTab  = 65536
+
+Dim gvbFAAReady
+Dim gviHeight, gviMaxLen, gviMinLen, gviWidth
+Dim gvdAcftRef, gvoFSO, gvoIE, gvoRequest, gvoWshShell
+Dim gvsLink
+
+
+Sub Window_OnLoad
+	Dim posVertical, posHorizontal
+	' Initialize variables for window size and input string length
+	gviHeight = 480
+	gviWidth  = 400
+	gviMinLen =   4
+	gviMaxLen =   8
+	' Resize the window
+	window.resizeTo gviWidth, gviHeight
+	' Position the window in the center of the screen
+	posHorizontal = CInt( ( window.screen.width  - gviWidth  ) / 2 )
+	posVertical   = CInt( ( window.screen.height - gviHeight ) / 2 )
+	window.moveTo posHorizontal, posVertical
+	' Add version number to window title and help text
+	document.title = "AirReg " & AirReg.Version
+	AirRegVersion.innerHTML = AirReg.Version
+	' prepare to open URLs in default browser
+	Set gvoWshShell = CreateObject( "Wscript.Shell" )
+	Set gvoFSO   = CreateObject( "Scripting.FileSystemObject" )
+	' Prepare FAA tables lookup
+	gvbFAAReady = False
+	window.setTimeout "ReadAcftRef", 100, "VBScript"
+	' Show input window
+	Back
+End Sub
+
+
+Sub Back( )
+	ImageBlock.style.display      = "none"
+	FAABlock.style.display        = "none"
+	PleaseWaitBlock.style.display = "none"
+	HelpBlock.style.display       = "none"
+	ErrorBlock.style.display      = "none"
+	MainBlock.style.display       = "block"
+	Reg.value                     = ""
+	Reg.focus
+End Sub
+
+
+Sub CheckEsc( )
+	' Show input window if ESC key is pressed in Help screen
+	If Self.window.event.keyCode = 27 And MainBlock.style.display = "none" Then Back
+End Sub
+
+
+Function FetchAirportData( strURL )
+	' Argument: URL of text to fetch
+	' Returns:  URL's innerHTML or Null
+	' Remark:   In Windows 8 and 10, the XmlHttpRequest will probably fail due to tighter security
+	'           restrictions; in that case InternetExplorer is used as a fallback, but it is SLOW!
+	Dim intLoopCount
+	FetchAirportData = Null ' Return value in case of unknown failure
+	On Error Resume Next ' Catch XMLHTTP errors (high probability)
+	Set gvoRequest = CreateObject( "Microsoft.XMLHTTP" )
+	gvoRequest.open "GET", strURL, False
+	gvoRequest.send vbNull
+	If Err Then
+		' Tight security settings may break the XMLHTTP method,
+		' in that case use Internet Explorer as a (slow) fallback
+		Set gvoIE = CreateObject( "InternetExplorer.Application" )
+		gvoIE.Visible = False
+		gvoIE.Navigate2 strURL, 0, "_self", Null, "Content-Type: text/json"
+		intLoopCount = 0
+		While gvoIE.Busy And intLoopCount < 10
+			Sleep 1
+			intLoopCount = intLoopCount + 1
+		Wend
+		If intLoopCount < 10 Then
+			FetchAirportData = gvoIE.Document.body.innerHTML
+		End If
+		gvoIE.Quit
+		Set gvoIE = Nothing
+	ElseIf gvoRequest.status = 200 Then
+		FetchAirportData = gvoRequest.responseText
+	Else
+		ImageBlock.style.display = "none"
+		ErrorBlock.style.display = "block"
+		ErrorBlock.innerHTML     = "Error " & gvoRequest.status & " (" & gvoRequest.statustext & ")"
+	End If
+	Set gvoRequest = Nothing
+	On Error Goto 0
+End Function
+
+
+Sub FetchFAAData( )
+	Dim objRE, strNiceType, strReg, strType, strURL, strWord
+	strReg  = Trim( UCase( Reg.value ) )
+	strType = ReadFAATables( strReg )
+	If strType = "" Then
+		ImageBlock.style.display      = "none"
+    	FAABlock.style.display        = "none"
+    	PleaseWaitBlock.style.display = "none"
+		ErrorBlock.style.display      = "block"
+		ErrorBlock.innerHTML          = "Unknown Error"
+	Else
+		strURL = "https://www.startpage.com/do/search?query="
+		strNiceType = ""
+		Set objRE = New RegExp
+		objRE.Pattern = "[0-9]"
+		For Each strWord In Split( strType )
+			If Not strNiceType = "" Then strNiceType = strNiceType & " "
+			If objRE.Test( strWord ) Then
+				strNiceType = strNiceType & UCase( strWord )
+			Else
+				strNiceType = strNiceType & UCase( Left( strWord, 1 ) ) & LCase( Mid( strWord, 2 ) )
+			End If
+		Next
+		strURL = strURL & Replace( Trim( strNiceType ), " ", "+" ) & "+" & strReg & "&host=wikipedia.org"
+		ImageBlock.style.display      = "none"
+    	PleaseWaitBlock.style.display = "none"
+		ErrorBlock.style.display      = "none"
+    	FAABlock.style.display        = "block"
+		WikiLink.innerHTML            = strNiceType
+		WikiLink.title                = strURL
+	End If
+	Sleep 1
+End Sub
+
+
+Sub Help( )
+	' Hide input window and show help text
+	MainBlock.style.display       = "none"
+	ErrorBlock.style.display      = "none"
+	FAABlock.style.display        = "none"
+	PleaseWaitBlock.style.display = "none"
+	HelpBlock.style.display       = "block"
+	BackButton.focus
+End Sub
+
+
+Sub Lookup( strReg )
+	Dim intError, intLength
+	Dim objMatches, objRE2
+	Dim strError, strImage, strNiceType, strPhotographer, strRspTxt, strType, strURL, strWord
+	'intLength = Len( Reg.value )
+	intLength = Len( strReg )
+	If intLength >= gviMinLen And intLength <= gviMaxLen Then
+		strURL    = "http://www.airport-data.com/api/ac_thumb.json?r=" & strReg
+		strRspTxt = FetchAirportData( strURL )
+		' {"status":404,"error":"Aircraft thumbnail not found."}
+		' {"status":200,"count":1,"data":[{"image":"http:\/\/www.airport-data.com\/images\/aircraft\/thumbnails\/001\/124\/001124807.jpg","link":"http:\/\/www.airport-data.com\/aircraft\/photo\/001124807.html","photographer":"Henk Geerlings"}]}
+		If Not IsNull( strRspTxt ) Then
+			Set objRE2 = New RegExp
+			objRE2.Pattern = """status"":(\d+),""error"":""([^""]+)"""
+			If objRE2.Test( strRspTxt ) Then
+				Set objMatches = objRE2.Execute( strRspTxt )
+				If objMatches.Item(0).SubMatches.Count > 0 Then
+					intError = objMatches.Item(0).Submatches(0)
+					strError = objMatches.Item(0).Submatches(1)
+				End If
+				If intError = 404 Then
+					If InStr( strReg, "-" ) = 0 And UCase( Left( strReg, 1 ) ) = "N" And IsNumeric( Mid( strReg, 2, 1 ) ) And gvbFAAReady Then
+						ImageBlock.style.display      = "none"
+						FAABlock.style.display        = "none"
+						PleaseWaitBlock.style.display = "block"
+						ErrorBlock.style.display      = "none"
+						' Start new thread to allow interface to update immediately
+						window.setTimeout "FetchFAAData", 100, "VBScript"
+					Else
+						If InStr( strReg, "-" ) < 4 Then
+							' Insert a hyphen at the (next) most likely position and try again
+							Select Case InStr( strReg, "-" )
+								Case 0:
+									strReg = Left( strReg, 1 ) & "-" & Mid( strReg, 2 )
+								Case 2:
+									strReg = Replace( strReg, "-", "" )
+									strReg = Left( strReg, 2 ) & "-" & Mid( strReg, 3 )
+								Case 3:
+									strReg = Replace( strReg, "-", "" )
+									strReg = Left( strReg, 3 ) & "-" & Mid( strReg, 4 )
+								Case Else:
+									strReg = Replace( strReg, "-", "" )
+							End Select
+							Reg.value = strReg
+							Lookup strReg
+						End If
+					End If
+				Else
+			    	ImageBlock.style.display      = "none"
+			    	PleaseWaitBlock.style.display = "none"
+			    	FAABlock.style.display        = "none"
+			    	ErrorBlock.style.display      = "block"
+			    	ErrorBlock.innerHTML          = "Error " & intError & " (" & strError & ")"
+			    End If
+			Else
+		    	objRE2.Pattern = """image"":""([^\""]+)"",""link"":""([^\""]+)"",""photographer"":""([^\""]+)"""
+		    	If objRE2.Test( strRspTxt ) Then
+					ImageBlock.style.display      = "block"
+			    	PleaseWaitBlock.style.display = "none"
+					ErrorBlock.style.display      = "none"
+		    		Set objMatches = objRE2.Execute( strRspTxt )
+		    		If objMatches.Item(0).Submatches.Count = 3 Then
+		    			strImage        = Replace( objMatches.Item(0).Submatches(0), "\", "" )
+		    			gvsLink         = Replace( objMatches.Item(0).Submatches(1), "\", "" )
+		    			strPhotographer = Replace( objMatches.Item(0).Submatches(2), "\", "" )
+		    		End If
+			    	Link.title                             = gvsLink
+			    	document.getElementById( "Image" ).src = strImage
+			    	Photographer.innerHTML                 = "Photo &copy; " & strPhotographer
+			    	ImageBlock.style.display               = "block"
+			    	PleaseWaitBlock.style.display          = "none"
+			    	FAABlock.style.display                 = "none"
+			    	ErrorBlock.style.display               = "none"
+		    	ElseIf ( UCase( Left( strReg, 1 ) ) = "N" ) And IsNumeric( Mid( strReg, 2, 1 ) ) And gvbFAAReady Then
+					ImageBlock.style.display      = "none"
+					FAABlock.style.display        = "none"
+					PleaseWaitBlock.style.display = "block"
+					ErrorBlock.style.display      = "none"
+					' Start new thread to allow interface to update immediately
+			    	window.setTimeout "FetchFAAData", 100, "VBScript"
+		    	Else
+					ImageBlock.style.display      = "none"
+			    	PleaseWaitBlock.style.display = "none"
+			    	FAABlock.style.display        = "none"
+					ErrorBlock.style.display      = "block"
+					ErrorBlock.innerHTML          = "Unknown Error"
+		    	End If
+			End If
+			Set objMatches = Nothing
+			Set objRE2     = Nothing
+		End If
+	End If
+End Sub
+
+
+Sub OnChangeInputReg( )
+	Dim intLength, objRE, strDashes
+	Select Case Self.window.event.keyCode
+		Case 13: ' ENTER key: start search
+			intLength = Len( Reg.value )
+			If intLength >= gviMinLen And intLength <= gviMaxLen Then Lookup Reg.value
+		Case 27: ' ESC key: clear input
+			Reg.value = ""
+		   	ImageBlock.style.display = "none"
+		   	ErrorBlock.style.display = "none"
+		Case Else:
+			If Self.window.event.keyCode >= 33 And Self.window.event.keyCode <= 40 Then
+				' ARROWS/PGUP/PGDN/HOME/END keys: ignore
+			ElseIf Self.window.event.keyCode = 8 Or Self.window.event.keyCode = 46 Then
+				' BACKSPACE/DEL keys: hide previous result
+				ImageBlock.style.display = "none"
+				ErrorBlock.style.display = "none"
+			ElseIf Self.window.event.keyCode = 45 Then
+				' INS key: ignore
+			ElseIf Self.window.event.keyCode >= 113 And Self.window.event.keyCode <= 123 Then
+				' F2..F12 keys: ignore
+			Else
+			   	ImageBlock.style.display = "none"
+			   	ErrorBlock.style.display = "none"
+				Reg.value = Trim( UCase( Reg.value ) )
+				Set objRE = New RegExp
+				objRE.Global = True
+				If Left( Reg.value, 1 ) = "N" Then
+					objRE.Pattern = "[^A-Z0-9]" ' Allow only letters and numbers for N numbers
+				Else
+					objRE.Pattern = "[^A-Z0-9-]" ' Allow only letters, numbers and dashes
+				End If
+				Reg.value = objRE.Replace( Reg.value, "" )
+				Reg.value = Left( Reg.value, gviMaxLen )
+				' Dashes are allowed, but NOT on the first position
+				If Left( Reg.value, 1 ) = "-" Then Reg.value = Replace( Reg.value, "-", "" )
+				' Only a single dash is allowed, remove dashes if more than one is found
+				objRE.Pattern = "[A-Z0-9]"
+				strDashes = objRE.Replace( Reg.value, "" )
+				If Len( strDashes ) > 1 Then Reg.value = Replace( Reg.value, "-", "" )
+				Set objRE = Nothing
+			End If
+	End Select
+End Sub
+
+
+Sub OnClickButtonLookup( )
+	Lookup Reg.value ' Start search
+End Sub
+
+Sub OpenAirportDataURL( )
+	gvoWshShell.Run "http://www.airport-data.com/", 1, False
+End Sub
+
+
+Sub OpenAPIURL( )
+	gvoWshShell.Run "http://www.airport-data.com/api/doc.php", 1, False
+End Sub
+
+
+Sub OpenDatabaseURL( )
+	gvowshshell.Run "https://www.faa.gov/licenses_certificates/aircraft_certification/aircraft_registry/releasable_aircraft_download/", 1, False
+End Sub
+
+
+Sub OpenFAASearchURL( )
+	gvoWshShell.Run WikiLink.title, 1, False
+End Sub
+
+
+Sub OpenFAAURL( )
+	gvoWshShell.Run "https://www.faa.gov/", 1, False
+End Sub
+
+
+Sub OpenImageURL( )
+	gvoWshShell.Run gvsLink, 1, False
+End Sub
+
+
+Sub OpenSoftwareURL( )
+	gvoWshShell.Run "https://www.robvanderwoude.com/airreg.php", 1, False
+End Sub
+
+
+Sub ReadAcftRef( )
+	Dim arrLine, objFile, strCode, strLine, strModel, strManufacturer
+	If gvoFSO.FileExists( "master.txt" ) And gvoFSO.FileExists( "acftref.txt" ) Then
+		Set gvdAcftRef = CreateObject( "scripting.Dictionary" )
+		Set objFile    = gvoFSO.OpenTextFile( "acftref.txt", ForReading, False, TristateUseDefault )
+		' Skip header line
+		objFile.ReadLine
+		' Loop through file and extract aircraft types
+		While Not objFile.AtEndOfStream
+			strLine = objFile.ReadLine( )
+			If Not Trim( strLine ) = "" Then
+				arrLine = Split( strLine, "," )
+				If UBound( arrLine ) > 2 Then
+					strCode         = Trim( arrLine(0) )
+					strManufacturer = Trim( arrLine(1) )
+					strModel        = Trim( arrLine(2) )
+					gvbFAAReady     = True
+					gvdAcftRef.Add strCode, strManufacturer & " " & strModel
+				End If
+			End If
+		Wend
+		Set objFile = Nothing 
+	End If
+End Sub
+
+
+Function ReadFAATables( Nnumber )
+	Dim arrLine, objFile, strCode, strLine, strNNumber, strReg
+	ReadFAATables = ""
+	strNNumber = Replace( UCase( Nnumber ), "-", "" )
+	If ( Left( strNNumber, 1 ) = "N" ) And IsNumeric( Mid( strNNumber, 2, 1 ) ) And gvbFAAReady Then
+		Set objFile = gvoFSO.OpenTextFile( "master.txt", ForReading, False, TristateUseDefault )
+		' Skip header line
+		objFile.ReadLine
+		' Loop through file and extract aircraft types
+		While Not objFile.AtEndOfStream
+			strLine = objFile.ReadLine( )
+			If Not Trim( strLine ) = "" Then
+				arrLine = Split( strLine, "," )
+				If UBound( arrLine ) > 2 Then
+					strReg  = "N" & Trim( arrLine(0) )
+					If strReg = strNNumber Then
+						strCode = Trim( arrLine(2) )
+						ReadFAATables = gvdAcftRef.Item( strCode )
+					End If
+				End If
+			End If
+		Wend
+		Set objFile = Nothing 
+	End If
+End Function
+
+
+Sub Sleep( seconds )
+	' Time delay for InternetExplorer.Application object in FetchAirportData( ) function
+	gvoWshShell.Run "PING -n " & CInt( seconds ) & " localhost", 7, True
+End Sub
+
+
+Sub Window_OnUnload
+	On Error Resume Next
+	gvoIE.Quit
+	Set gvoIE       = Nothing
+	Set gvoFSO      = Nothing
+	Set gvoRequest  = Nothing
+	Set gvoWshShell = Nothing
+	Set gvdAcftRef  = Nothing
+	On Error Goto 0
+End Sub
+</script>
+
+
+<body onhelp="vbscript:Help" onkeyup="vbscript:CheckEsc">
+
+
+
+<div id="MainBlock">
+
+<p class="Center"><input type="text" id="Reg" onkeyup="vbscript:OnChangeInputReg" title="Enter airplane registration (4..8 characters; letters, numbers and dashes only)" style="width: 150px;" />
+&nbsp;
+<input type="button" class="Button" id="Lookup" value="Lookup" onclick="vbscript:OnClickButtonLookup" />
+&nbsp;
+<input type="button" class="Button" value="Help" onclick="vbscript:Help" /></p>
+
+<div id="ImageBlock" style="display: none;">
+
+<p class="Center"><span id="Link" onclick="vbscript:OpenImageURL"><img id="Image" /></span></p>
+
+<p>Click on the photo to view it on www.airport-data.com</p>
+
+<p id="Photographer"></p>
+
+</div><!-- End of ImageBlock -->
+
+
+<div id="PleaseWaitBlock" style="display:none">
+
+<p>Aircraft registration not found on Airport-data.com, searching FAA database<br /><br />Please&nbsp;wait&nbsp;.&nbsp;.&nbsp;.</p>
+
+</div><!-- End of PleaseWaitBlock -->
+
+
+
+<div id="FAABlock" style="display: none;">
+
+<p style="margin-left: 10px;"><span class="Link" id="WikiLink" onclick="vbscript:OpenFAASearchURL"></span></p>
+
+<p>Click on the link to search for the aircraft on Wikipedia</p>
+
+</div><!-- End of FAABlock -->
+
+
+
+<p id="ErrorBlock" style="display: none;"></p>
+
+</div><!-- End of MainBlock -->
+
+
+
+<div id="HelpBlock" style="display: none;">
+
+<h2 class="Center">AirReg <span id="AirRegVersion" title="Click to check for latest version" onclick="vbscript:OpenSoftwareURL">0.00</span></h2>
+
+<p>Demo script to look up airplane data by their registration number, using <span class="Link" title="http://www.airport-data.com/api/doc.php" onclick="vbscript:OpenAPIURL">Airport-data.com's API</span>.</p>
+
+<p>If an aircraft registration starting with N followed by a number is not found on Airport-data.com, and if the MASTER.txt and ACFTREF.txt files from the downloaded <span class="Link" title="https://www.faa.gov/licenses_certificates/aircraft_certification/aircraft_registry/releasable_aircraft_download/" onclick="vbscript:OpenDatabaseURL">FAA's Releasable Aircraft Registry Database</span> are located in this HTA's parent folder, then the HTA will search these files for the aircraft type, and provide a link to Wikipedia search results.</p>
+
+<p>An FAA database search takes a <em>lot</em> longer than an Airport-Data.com search!</p>
+
+<p>&copy; 2020 Rob van der Woude<br />
+<span class="Link" title="https://www.robvanderwoude.com/airreg.php" onclick="vbscript:OpenSoftwareURL">http://www.robvanderwoude.com/airreg.php</span></p>
+
+<p><strong>Note:</strong> Neither this software nor its author are associated with <span class="Link" title="http://www.airport-data.com/" onclick="vbscript:OpenAirportDataURL">Airport-data.com</span> nor with the <span class="Link" title="https://www.faa.gov/" onclick="OpenFAAURL">FAA</span></p>
+
+<p class="Center"><input type="button" class="Button" id="BackButton" value="Back" onclick="vbscript:Back" /></p>
+
+</div><!-- End of HelpBlock -->
+
+
+</body>
+</html>
